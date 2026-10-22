@@ -16,6 +16,7 @@ cells = [
 | Exportação ONNX | Formato portátil que roda em Android/iOS/embarcados | `torch.onnx` + ONNX Runtime |
 | Quantização INT8 dinâmica | Pesos em int8; ativações quantizadas em tempo de execução | `onnxruntime.quantization` |
 | Quantização INT8 estática | Pesos **e** ativações em int8, com calibração por canal (QDQ) | `onnxruntime.quantization` |
+| Diagnóstico + quantização mista | Sensibilidade por bloco, outliers de ativação, INT8 misto e W8A16 | `onnxruntime.quantization` |
 | Pruning L1 não estruturado | Zera os pesos de menor magnitude | `torch.nn.utils.prune` |
 | TorchScript (trace + freeze) | Grafo estático otimizado, executável sem Python (C++/mobile) | `torch.jit` |
 
@@ -256,7 +257,133 @@ quantize_static(prep_onnx, static_onnx, CalibReader(calib_ds),
 print(f"calibração + quantização: {time.perf_counter() - t0:.0f}s")
 sess = make_session(static_onnx, NUM_THREADS)
 lat = benchmark(lambda x: sess.run(None, {"input": x}), x_np)
-record("ONNX INT8 estático (QDQ)", file_mb(static_onnx), accuracy_onnx(static_onnx, test_dl), lat)
+record("ONNX INT8 estático (ingênuo)", file_mb(static_onnx), accuracy_onnx(static_onnx, test_dl), lat)
+"""),
+("md", """
+## 5b. Diagnóstico: por que o INT8 estático perdeu tanta acurácia?
+
+Na minha primeira execução, o INT8 estático "ingênuo" (MinMax, todas as camadas em int8) caiu de ~90% para **~3%** de top-1, o que equivale a chutar. A quantização dinâmica ficou em ~56%. Antes de aceitar o resultado, investiguei a causa em três passos:
+
+1. **Sensibilidade por bloco:** quantizo um bloco de cada vez e meço a queda de acurácia.
+2. **Estatísticas das ativações:** para cada tensor, comparo o valor máximo com o percentil 99,9%.
+3. **Correção:** mantenho em maior precisão só os tensores problemáticos.
+
+Para não contaminar o resultado final, o diagnóstico usa imagens do `trainval` diferentes das de calibração. O conjunto de teste continua reservado para a tabela final.
+"""),
+("code", r"""
+import re
+calib_set = set(calib_idx)
+diag_idx = [i for i in torch.randperm(len(trainval_ds), generator=torch.Generator().manual_seed(SEED + 1)).tolist()
+            if i not in calib_set][: (64 if SMOKE else 300)]
+diag_X = np.stack([trainval_ds[i][0].numpy() for i in diag_idx])
+diag_y = np.array([trainval_ds[i][1] for i in diag_idx])
+
+def acc_diag(path):
+    sess = make_session(path)
+    logits = np.concatenate([sess.run(None, {"input": diag_X[i:i + 50]})[0] for i in range(0, len(diag_X), 50)])
+    return float((logits.argmax(1) == diag_y).mean())
+
+def quantize(out, **overrides):
+    params = dict(quant_format=QuantFormat.QDQ, per_channel=True, activation_type=QuantType.QUInt8,
+                  weight_type=QuantType.QInt8, calibrate_method=CalibrationMethod.MinMax)
+    params.update(overrides)
+    quantize_static(prep_onnx, out, CalibReader(calib_ds), **params)
+    return out
+
+graph = onnx.load(prep_onnx).graph
+blocks = {}
+for n in graph.node:
+    k = re.search(r"/features\.(\d+)/", n.name)
+    if k:
+        blocks.setdefault(f"features.{int(k.group(1)):02d}", []).append(n.name)
+    elif "classifier" in n.name:
+        blocks.setdefault("classifier", []).append(n.name)
+
+acc_fp32_diag = acc_diag(fp32_onnx)
+tmp_onnx = f"{ARTIFACTS}/_tmp_quant.onnx"
+sens = []
+for name, nodes in sorted(blocks.items()):
+    acc = acc_diag(quantize(tmp_onnx, nodes_to_quantize=nodes))
+    sens.append({"bloco": name, "top1": acc, "queda_pp": (acc_fp32_diag - acc) * 100})
+df_sens = pd.DataFrame(sens)
+
+fig, ax = plt.subplots(figsize=(10, 3.5))
+ax.bar(df_sens["bloco"], df_sens["queda_pp"], color=["tab:red" if q > 5 else "tab:gray" for q in df_sens["queda_pp"]])
+ax.set(ylabel="queda de top-1 (p.p.)", title=f"Quantizando UM bloco por vez (FP32 = {acc_fp32_diag:.1%} neste conjunto)")
+ax.tick_params(axis="x", rotation=60); ax.grid(alpha=0.3, axis="y"); plt.tight_layout(); plt.show()
+df_sens.sort_values("queda_pp", ascending=False).head(6).round(3)
+"""),
+("md", """
+Quantizar um único bloco já pode destruir o modelo. Num grafo QDQ, quantizar um bloco também quantiza o **tensor de entrada** dele, então o vilão costuma ser uma **ativação**, não os pesos. Por isso o próximo passo mede cada tensor.
+"""),
+("code", r"""
+probe = onnx.load(prep_onnx)
+skip_ops = {"Shape", "Gather", "Unsqueeze", "Concat", "Reshape", "Flatten"}
+tensor_names = [o for n in probe.graph.node if n.op_type not in skip_ops for o in n.output]
+for t in tensor_names:
+    probe.graph.output.append(onnx.helper.make_tensor_value_info(t, onnx.TensorProto.FLOAT, None))
+probe_sess = ort.InferenceSession(probe.SerializeToString(), providers=["CPUExecutionProvider"])
+
+peak = {t: 0.0 for t in tensor_names}
+p999 = {t: [] for t in tensor_names}
+for x, _ in DataLoader(calib_ds, batch_size=16):
+    for t, v in zip(tensor_names, probe_sess.run(tensor_names, {"input": x.numpy()})):
+        a = np.abs(v)
+        peak[t] = max(peak[t], float(a.max()))
+        p999[t].append(float(np.percentile(a, 99.9)))
+df_act = pd.DataFrame({"tensor": tensor_names, "max_abs": [peak[t] for t in tensor_names],
+                       "p99_9": [np.mean(p999[t]) for t in tensor_names]})
+df_act["razao_outlier"] = df_act["max_abs"] / df_act["p99_9"].clip(lower=1e-6)
+df_act = df_act.sort_values("razao_outlier", ascending=False).reset_index(drop=True)
+del probe, probe_sess
+
+worst = df_act.loc[0]
+fig, ax = plt.subplots(figsize=(8, 3.5))
+ax.bar(range(len(df_act)), df_act["razao_outlier"]); ax.set_yscale("log")
+ax.set(xlabel="tensores (ordenados)", ylabel="máximo / percentil 99,9%", title="Outliers de ativação por tensor")
+ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
+print(f"pior tensor: {worst['tensor']}")
+print(f"  máximo |x| = {worst['max_abs']:.1f}, mas 99,9% dos valores estão abaixo de {worst['p99_9']:.1f}")
+print(f"  com MinMax em 8 bits, o passo de quantização fica ~{2 * worst['max_abs'] / 255:.2f}: quase todos os valores caem no mesmo nível")
+df_act.head(8).round(2)
+"""),
+("md", """
+**Diagnóstico:** poucos canais, em poucas imagens, produzem valores dezenas de vezes maiores que o resto. Isso acontece principalmente nas conexões residuais e nas convoluções *depthwise*. Com a calibração MinMax, a escala de 8 bits se estica para cobrir esses picos, e os valores típicos perdem toda a resolução. É um problema conhecido de quantizar MobileNets (Nagel et al., 2019, *Data-Free Quantization*).
+
+**Correções testadas:**
+- **INT8 misto:** os tensores com outlier e as camadas que os produzem ou consomem ficam em **FP32**; o resto, em int8. Escolho o limiar no conjunto de diagnóstico.
+- **W8A16:** pesos em int8 (o arquivo continua pequeno), mas **todas as ativações em 16 bits**, com 256× mais níveis. NPUs de celular, como a Qualcomm Hexagon, têm suporte nativo a esse formato. Nesta CPU ele é emulado e fica mais lento.
+"""),
+("code", r"""
+producer = {o: n.name for n in graph.node for o in n.output}
+consumers = {}
+for n in graph.node:
+    for i in n.input:
+        consumers.setdefault(i, []).append(n.name)
+
+def nodes_around(tensors):
+    return sorted({producer[t] for t in tensors if t in producer} | {c for t in tensors for c in consumers.get(t, [])})
+
+threshold_rows = []
+for thr in (20, 10, 6):
+    keep = nodes_around(df_act.loc[df_act["razao_outlier"] > thr, "tensor"])
+    acc = acc_diag(quantize(tmp_onnx, nodes_to_exclude=keep))
+    threshold_rows.append({"limiar": thr, "nos_em_fp32": len(keep), "top1_diag": acc})
+    print(f"limiar {thr:2d}: {len(keep):2d} nós em FP32 -> top-1 (diagnóstico) {acc:.3f}")
+best_thr = max(threshold_rows, key=lambda r: r["top1_diag"])["limiar"]
+keep_fp32 = nodes_around(df_act.loc[df_act["razao_outlier"] > best_thr, "tensor"])
+
+mixed_onnx = quantize(f"{ARTIFACTS}/mobilenetv3_pets_int8_mixed.onnx", nodes_to_exclude=keep_fp32)
+sess = make_session(mixed_onnx, NUM_THREADS)
+lat = benchmark(lambda x: sess.run(None, {"input": x}), x_np)
+record(f"ONNX INT8 misto ({len(keep_fp32)} nós FP32)", file_mb(mixed_onnx), accuracy_onnx(mixed_onnx, test_dl), lat)
+
+w8a16_onnx = quantize(f"{ARTIFACTS}/mobilenetv3_pets_w8a16.onnx", activation_type=QuantType.QUInt16,
+                      extra_options={"UseQDQContribOps": True})
+sess = make_session(w8a16_onnx, NUM_THREADS)
+lat = benchmark(lambda x: sess.run(None, {"input": x}), x_np)
+record("ONNX W8A16", file_mb(w8a16_onnx), accuracy_onnx(w8a16_onnx, test_dl), lat)
+os.remove(tmp_onnx)
 """),
 ("md", """
 ## 6. Pruning: esparsidade não é o mesmo que velocidade
@@ -493,7 +620,8 @@ df_exec.round(2)
 Leia a tabela acima e, depois de rodar, ajuste este texto com os seus números. O que costuma aparecer:
 
 - **ONNX Runtime FP32** já costuma ser mais rápido que o PyTorch *eager* com batch 1, por causa da fusão de operadores e do menor overhead por chamada. A acurácia é idêntica.
-- **INT8 estático** reduz o tamanho em cerca de 4× (float32 → int8) e, em CPUs com instruções int8 (AVX2/VNNI no x86, NEON/dotprod no ARM), também reduz a latência. A perda de acurácia costuma ficar em poucos pontos percentuais, e a quantização por canal é o que mantém essa perda pequena.
+- **INT8 estático ingênuo** reduz o tamanho em cerca de 4× e a latência, mas **destruiu a acurácia** deste modelo. A causa são outliers nas ativações, que achei com análise de sensibilidade por bloco e estatísticas por tensor. Lição: quantização não é um botão; precisa ser validada e diagnosticada.
+- **INT8 misto** (só os tensores problemáticos em FP32) recupera boa parte da acurácia e mantém parte do ganho de velocidade. **W8A16** recupera quase toda a acurácia com o mesmo tamanho do INT8, mas só é rápido em hardware com suporte a 16 bits (NPUs). A escolha certa depende de onde o modelo vai rodar, ou seja, de **sistemas heterogêneos**.
 - **INT8 dinâmico** diminui o arquivo, mas tende a não ganhar velocidade (ou até perder) em CNNs: calcular a escala das ativações a cada inferência custa caro. Por isso a recomendação para visão é a quantização estática.
 - **Pruning não estruturado** comprime bem o arquivo, mas **não acelera** a inferência densa. A acurácia se mantém até certo nível de esparsidade e depois cai rápido, porque a MobileNetV3 já é compacta e tem pouca redundância.
 - **TorchScript** elimina o overhead do Python e funde operações; compare o ganho dele com o do ONNX Runtime.
@@ -503,7 +631,8 @@ Leia a tabela acima e, depois de rodar, ajuste este texto com os seus números. 
 
 ### Limitações e próximos passos
 - Medir num **celular de verdade** (ONNX Runtime Mobile, ou ExecuTorch / TFLite) e com aceleradores (NNAPI, Core ML, GPU do celular). É aí que entram os **sistemas heterogêneos**: decidir que parte do grafo roda na CPU, na GPU ou na NPU.
-- Fazer **QAT** (*quantization-aware training*) para recuperar a acurácia perdida na quantização.
+- Fazer **QAT** (*quantization-aware training*): treinar já simulando o int8 ensina o modelo a evitar os outliers, e é a solução mais robusta para W8A8.
+- Testar **Cross-Layer Equalization** (Nagel et al., 2019), que redistribui a escala entre camadas consecutivas para reduzir os outliers sem retreinar.
 - Fazer **pruning estruturado** de canais + *fine-tuning* para ganhar latência de verdade.
 - Testar **distilação de conhecimento**, usando um modelo maior (ResNet-50/ViT) como professor da MobileNet.
 """),

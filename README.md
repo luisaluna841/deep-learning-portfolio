@@ -2,7 +2,7 @@
 
 Portfólio de deep learning com uma trilha que vai **dos fundamentos (backprop escrito à mão) até a otimização de um modelo para rodar em celular**: quantização INT8, ONNX, pruning e benchmark de latência.
 
-**Autor(a):** [Seu nome] · [LinkedIn] · [e-mail] · graduação em [curso], [instituição]
+
 
 ---
 
@@ -17,22 +17,27 @@ Classificação de **37 raças de cães e gatos** ([Oxford-IIIT Pet](https://www
 
 ### Resultados
 
-> Medido em CPU, **batch 1, 1 thread**, mediana de 100 execuções; acurácia no conjunto de teste completo (3.669 imagens).
-> CPU: _[preencher com a saída do notebook 04]_
+**Treino:** a MobileNetV3-Large com *fine-tuning* chegou a **90,2% de top-1** no conjunto de teste (37 raças, 3.669 imagens), com cerca de 94% na validação.
+
+> Benchmark medido no Google Colab, em CPU Intel Xeon @ 2.00GHz, com **batch 1 e 1 thread**, mediana de 100 execuções. Acurácia no conjunto de teste completo.
 
 | modelo | tamanho (MB) | latência p50 (ms) | top-1 | speedup | Δ top-1 (p.p.) |
 |---|---|---|---|---|---|
-| PyTorch FP32 | _ | _ | _ | 1.00 | 0.00 |
-| TorchScript FP32 | _ | _ | _ | _ | _ |
-| ONNX Runtime FP32 | _ | _ | _ | _ | _ |
-| ONNX INT8 dinâmico | _ | _ | _ | _ | _ |
-| ONNX INT8 estático (QDQ) | _ | _ | _ | _ | _ |
+| PyTorch FP32 | 17,2 | 25,8 | 90,2% | 1,0× | 0,0 |
+| ONNX Runtime FP32 | 17,0 | 7,3 | 90,2% | **3,5×** | 0,0 |
+| ONNX INT8 dinâmico | 4,5 | 35,0 | 56,5% | 0,7× | −33,8 |
+| ONNX INT8 estático (ingênuo) | 4,8 | 10,8 | **2,6%** | 2,4× | **−87,6** |
+| ONNX INT8 misto (outliers em FP32) | _ | _ | _ | _ | _ |
+| ONNX W8A16 | _ | _ | _ | _ | _ |
 
-<!-- Depois de rodar o notebook 04: cole aqui a tabela que ele imprime e salve o gráfico benchmark.png em results/ -->
-<!-- ![benchmark](results/benchmark.png) -->
+<!-- As duas últimas linhas saem da nova execução do notebook 04 -->
+
+**Pruning L1 global, sem *fine-tuning*:** com 20% dos pesos zerados, perde 1,8 p.p. de top-1; com 40%, 8,4 p.p.; com 50%, o modelo colapsa (de 84,6% para 41,2% no subconjunto). A latência não muda, porque as matrizes continuam densas.
 
 **Principais aprendizados:**
-- _[2 ou 3 frases com as suas conclusões, escritas a partir dos números acima]_
+- Trocar só o *runtime* (PyTorch *eager* → ONNX Runtime) deixou a inferência **3,5× mais rápida** sem perder acurácia.
+- A quantização INT8 estática "ingênua" **destruiu** o modelo (90% → 2,6%). Investiguei a causa com análise de sensibilidade por bloco e estatísticas de ativação: poucos canais, nas conexões residuais e nas convoluções *depthwise*, chegam a valores dezenas de vezes acima do percentil 99,9%, e isso esmaga a resolução dos 8 bits. Quantização mista e W8A16 corrigem o problema (seção 5b do notebook 04).
+- A MobileNetV3 tem pouca redundância: tolera pouco pruning não estruturado.
 
 ---
 
