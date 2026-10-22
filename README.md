@@ -2,7 +2,7 @@
 
 Portfólio de deep learning com uma trilha que vai **dos fundamentos (backprop escrito à mão) até a otimização de um modelo para rodar em celular**: quantização INT8, ONNX, pruning e benchmark de latência.
 
-**Autor(a):** [Seu nome] · [LinkedIn] · [e-mail] · graduação em [curso], [instituição]
+
 
 ---
 
