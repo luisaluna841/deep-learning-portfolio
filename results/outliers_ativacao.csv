@@ -1,0 +1,4 @@
+tensor,desvio_padrao,max_abs,p99_9_abs,canal_dominante
+features.6 / Add (saída do bloco),6.17,158.9,23.4,31
+features.10 / Add (saída do bloco),4.98,535.8,17.8,21
+features.11 / conv depthwise,1.51,701.8,5.5,243
