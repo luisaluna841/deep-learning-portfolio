@@ -1,0 +1,10 @@
+data/
+artifacts/
+*.pth
+*.onnx
+*.onnx.data
+*.executed.ipynb
+.ipynb_checkpoints/
+__pycache__/
+.venv/
+venv/

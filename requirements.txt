@@ -1,0 +1,10 @@
+torch>=2.3
+torchvision>=0.18
+numpy
+matplotlib
+pandas
+scikit-learn
+onnx
+onnxruntime
+onnxscript
+jupyter
