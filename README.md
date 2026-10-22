@@ -12,8 +12,8 @@ Classificação de **37 raças de cães e gatos** ([Oxford-IIIT Pet](https://www
 
 | Notebook | Conteúdo |
 |---|---|
-| [03 · Transfer learning](notebooks/03_projeto_transfer_learning_mobilenetv3.ipynb) | *Fine-tuning* em duas fases, LR por grupo de camadas, AMP, avaliação top-1/top-5, análise de erros e **Grad-CAM** implementado do zero |
-| [04 · Otimização para mobile](notebooks/04_projeto_otimizacao_mobile.ipynb) | Exportação **ONNX**, quantização **INT8 dinâmica e estática (QDQ, por canal)**, **pruning** L1 global e benchmark de latência, tamanho e acurácia |
+| [03 · Transfer learning](notebooks/03_projeto_transfer_learning_mobilenetv3.ipynb) | *Fine-tuning* em duas fases, LR por grupo de camadas, AMP, avaliação top-1/top-5, análise de erros, **Grad-CAM** implementado do zero e **registro de experimentos** (configuração, TensorBoard, melhor modelo) |
+| [04 · Otimização para mobile](notebooks/04_projeto_otimizacao_mobile.ipynb) | **TorchScript**, exportação **ONNX**, quantização **INT8 dinâmica e estática (QDQ, por canal)**, **pruning** L1 global e benchmark de latência, tamanho e acurácia. **Análise de performance:** MACs × latência em 6 arquiteturas, escalabilidade com threads e o trade-off entre batch, latência e vazão em CPU × GPU (FP32/FP16) |
 
 ### Resultados
 
@@ -23,6 +23,7 @@ Classificação de **37 raças de cães e gatos** ([Oxford-IIIT Pet](https://www
 | modelo | tamanho (MB) | latência p50 (ms) | top-1 | speedup | Δ top-1 (p.p.) |
 |---|---|---|---|---|---|
 | PyTorch FP32 | _ | _ | _ | 1.00 | 0.00 |
+| TorchScript FP32 | _ | _ | _ | _ | _ |
 | ONNX Runtime FP32 | _ | _ | _ | _ | _ |
 | ONNX INT8 dinâmico | _ | _ | _ | _ | _ |
 | ONNX INT8 estático (QDQ) | _ | _ | _ | _ | _ |
@@ -40,14 +41,16 @@ Classificação de **37 raças de cães e gatos** ([Oxford-IIIT Pet](https://www
 | Notebook | Conteúdo |
 |---|---|
 | [01 · MLP do zero](notebooks/01_fundamentos_mlp_numpy_vs_pytorch.ipynb) | MLP em **NumPy puro**: forward, backprop manual, SGD com momentum, **gradient check** e comparação dos gradientes com o autograd do PyTorch (MNIST) |
-| [02 · CNN residual](notebooks/02_cnn_cifar10.ipynb) | ResNet pequena treinada do zero no CIFAR-10: augmentation, OneCycleLR, label smoothing, **mixed precision**, matriz de confusão, erros de alta confiança, throughput |
+| [02 · CNN residual](notebooks/02_cnn_cifar10.ipynb) | ResNet pequena treinada do zero no CIFAR-10: augmentation, OneCycleLR, label smoothing, **mixed precision**, matriz de confusão, erros de alta confiança, throughput e registro de experimentos no **TensorBoard** |
 
 ## Competências demonstradas
 
 - **Deep learning:** backpropagation, CNNs, conexões residuais, BatchNorm, regularização, agendamento de LR, *transfer learning*
 - **Visão computacional:** classificação *fine-grained*, data augmentation, interpretabilidade (Grad-CAM)
-- **Otimização e deploy:** ONNX, ONNX Runtime, quantização pós-treino (dinâmica/estática, por canal), pruning e metodologia de benchmark (aquecimento, mediana/p90, threads fixas)
-- **Ferramentas:** PyTorch, torchvision, NumPy, scikit-learn, pandas, Matplotlib, Git
+- **Otimização e deploy:** TorchScript, ONNX, ONNX Runtime, quantização pós-treino (dinâmica/estática, por canal), pruning e metodologia de benchmark (aquecimento, mediana/p90, threads fixas)
+- **Análise de performance:** latência × vazão, efeito do batch e das threads, CPU × GPU, FP32 × FP16 × INT8, e por que MACs não preveem latência
+- **Experimentos reproduzíveis:** configuração centralizada e salva por execução, TensorBoard (curvas e comparação de hiperparâmetros), melhor modelo salvo pela validação
+- **Ferramentas:** PyTorch, torchvision, ONNX Runtime, TensorBoard, NumPy, scikit-learn, pandas, Matplotlib, Git
 
 ## Como executar
 
