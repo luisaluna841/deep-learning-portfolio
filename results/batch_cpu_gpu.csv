@@ -1,0 +1,12 @@
+execução,batch,latencia_ms,img_por_s
+CPU ONNX FP32 (2 threads),1,6.61,151.27
+CPU ONNX FP32 (2 threads),8,60.7,131.79
+CPU ONNX FP32 (2 threads),32,257.05,124.49
+GPU PyTorch FP32 (Tesla T4),1,5.92,169.03
+GPU PyTorch FP32 (Tesla T4),8,7.5,1066.04
+GPU PyTorch FP32 (Tesla T4),32,27.0,1185.25
+GPU PyTorch FP32 (Tesla T4),128,112.05,1142.31
+GPU PyTorch FP16 (Tesla T4),1,7.21,138.66
+GPU PyTorch FP16 (Tesla T4),8,7.19,1113.0
+GPU PyTorch FP16 (Tesla T4),32,16.62,1924.87
+GPU PyTorch FP16 (Tesla T4),128,72.97,1754.23

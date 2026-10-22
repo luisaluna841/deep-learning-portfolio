@@ -1,0 +1,8 @@
+modelo,tamanho_MB,latencia_ms_p50,latencia_ms_p90,top1,speedup,reducao_tamanho,delta_top1_pp
+PyTorch FP32,17.21,36.93,64.31,0.9024,1.0,1.0,0.0
+TorchScript FP32,16.99,12.67,13.8,0.9024,2.92,1.01,0.0
+ONNX Runtime FP32,16.99,6.57,7.6,0.9024,5.62,1.01,0.0
+ONNX INT8 dinâmico,4.47,32.18,34.06,0.5457,1.15,3.85,-35.68
+ONNX INT8 estático (ingênuo),4.75,9.69,10.5,0.0264,3.81,3.62,-87.6
+ONNX INT8 misto (51 nós FP32),8.87,9.23,10.3,0.6517,4.0,1.94,-25.07
+ONNX W8A16,4.76,31.57,33.77,0.9027,1.17,3.61,0.03

@@ -1,0 +1,5 @@
+modelo,threads,latencia_ms_p50,speedup_vs_1
+ONNX FP32,1,7.305,1.0
+ONNX FP32,2,7.248,1.008
+ONNX INT8 estático,1,10.344,1.0
+ONNX INT8 estático,2,10.896,0.949

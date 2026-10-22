@@ -1,0 +1,7 @@
+arquitetura,params_M,GMACs,latencia_ms_p50,ms_por_GMAC
+MobileNetV3-Small,2.543,0.057,10.094,178.619
+MobileNetV3-Large,5.483,0.217,20.045,92.548
+ShuffleNetV2 1.0x,2.279,0.145,18.612,128.443
+EfficientNet-B0,5.289,0.386,35.045,90.835
+ResNet-18,11.69,1.814,57.114,31.484
+ResNet-50,25.557,4.089,126.639,30.969

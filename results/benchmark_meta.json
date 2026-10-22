@@ -1,0 +1,9 @@
+{
+ "cpu": "Intel(R) Xeon(R) CPU @ 2.00GHz",
+ "threads": 1,
+ "torch": "2.11.0+cu130",
+ "onnxruntime": "1.31.0",
+ "runs": 100,
+ "test_images": 3669,
+ "smoke": false
+}
