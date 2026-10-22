@@ -1,4 +1,5 @@
 from nbbuild import build, colab_badge
+import hfdata
 
 NAME = "03_projeto_transfer_learning_mobilenetv3.ipynb"
 
@@ -18,6 +19,8 @@ cells = [
 3. Interpretabilidade com **Grad-CAM** (implementado à mão).
 4. Salvar o checkpoint para a **parte 2: otimização e benchmark** (notebook 04).
 
+Cada execução é registrada (configuração, curvas no TensorBoard, melhor modelo pela validação e métricas finais), para os experimentos serem reproduzíveis e comparáveis.
+
 > No Colab, use GPU (T4). O checkpoint vai para o Google Drive, para o notebook 04 conseguir carregá-lo.
 """),
 ("code", """
@@ -28,7 +31,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms as T
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import transforms as T
 from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights
 
 SMOKE = os.environ.get("SMOKE_TEST") == "1"
@@ -49,25 +53,56 @@ os.makedirs(ARTIFACTS, exist_ok=True)
 print("device:", device, "| torch", torch.__version__)
 """),
 ("md", """
+## 0. Configuração do experimento
+
+Hiperparâmetros centralizados e salvos com cada execução (`artifacts/runs/<nome>/config.json`), junto com os logs do TensorBoard e o melhor modelo. Para testar uma variação, mude aqui e rode de novo.
+"""),
+("code", """
+CONFIG = {
+    "experimento": "pets_mobilenetv3_large",
+    "img_size": 224,
+    "batch_size": 64,
+    "epochs_head": 1 if SMOKE else 3,
+    "epochs_finetune": 1 if SMOKE else 8,
+    "lr_head": 1e-3,
+    "lr_backbone_ft": 1e-4,
+    "lr_classifier_ft": 1e-3,
+    "weight_decay": 1e-4,
+    "label_smoothing": 0.1,
+    "rrc_scale_min": 0.6,
+    "color_jitter": 0.2,
+    "amp": USE_AMP,
+    "seed": SEED,
+}
+RUN_NAME = f"{CONFIG['experimento']}_{time.strftime('%Y%m%d-%H%M%S')}"
+RUN_DIR = f"{ARTIFACTS}/runs/{RUN_NAME}"
+os.makedirs(RUN_DIR, exist_ok=True)
+with open(f"{RUN_DIR}/config.json", "w") as f:
+    json.dump(CONFIG, f, indent=1)
+print("execução:", RUN_DIR)
+"""),
+("code", hfdata.CELL + hfdata.PETS),
+("md", """
 ## 1. Dados
 
 - `trainval` (3.680 imagens) é dividido em 90% treino e 10% validação. O `test` oficial (3.669 imagens) só é usado no final.
 - No treino uso `RandomResizedCrop`, flip e `ColorJitter`; na avaliação, resize + crop central. A normalização usa a média e o desvio do ImageNet, porque o backbone foi pré-treinado nele.
 """),
 ("code", """
-IMG_SIZE = 224
+IMG_SIZE = CONFIG["img_size"]
 IMAGENET_MEAN, IMAGENET_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+cj = CONFIG["color_jitter"]
 train_tf = T.Compose([
-    T.RandomResizedCrop(IMG_SIZE, scale=(0.6, 1.0)),
+    T.RandomResizedCrop(IMG_SIZE, scale=(CONFIG["rrc_scale_min"], 1.0)),
     T.RandomHorizontalFlip(),
-    T.ColorJitter(0.2, 0.2, 0.2),
+    T.ColorJitter(cj, cj, cj),
     T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD),
 ])
-eval_tf = T.Compose([T.Resize(256), T.CenterCrop(IMG_SIZE), T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+eval_tf = T.Compose([T.Resize(int(IMG_SIZE * 256 / 224)), T.CenterCrop(IMG_SIZE), T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
 
-trainval_aug = datasets.OxfordIIITPet(DATA_DIR, split="trainval", download=True, transform=train_tf)
-trainval_plain = datasets.OxfordIIITPet(DATA_DIR, split="trainval", download=False, transform=eval_tf)
-test_ds = datasets.OxfordIIITPet(DATA_DIR, split="test", download=True, transform=eval_tf)
+trainval_aug = load_pets("trainval", train_tf)  # espelho do Oxford-IIIT Pet no Hugging Face (splits oficiais)
+trainval_plain = trainval_aug.with_transform(eval_tf)
+test_ds = load_pets("test", eval_tf)
 CLASSES = trainval_aug.classes
 NUM_CLASSES = len(CLASSES)
 
@@ -79,8 +114,8 @@ if SMOKE:
     test_ds = Subset(test_ds, list(range(0, len(test_ds), 30)))
 train_ds, val_ds = Subset(trainval_aug, tr_idx), Subset(trainval_plain, val_idx)
 
-loader_kw = dict(num_workers=2, pin_memory=device == "cuda")
-train_dl = DataLoader(train_ds, batch_size=64, shuffle=True, drop_last=True, **loader_kw)
+loader_kw = dict(num_workers=NUM_WORKERS, pin_memory=device == "cuda")
+train_dl = DataLoader(train_ds, batch_size=CONFIG["batch_size"], shuffle=True, drop_last=True, **loader_kw)
 val_dl = DataLoader(val_ds, batch_size=128, **loader_kw)
 test_dl = DataLoader(test_ds, batch_size=128, **loader_kw)
 print(f"{NUM_CLASSES} classes | treino {len(train_ds)} | validação {len(val_ds)} | teste {len(test_ds)}")
@@ -118,7 +153,7 @@ print(model.classifier)
 **Fase 2 (fine-tuning):** descongelo tudo. O backbone usa LR 10× menor que a cabeça, para não destruir as features aprendidas no ImageNet. Agendamento em cosseno.
 """),
 ("code", """
-criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+criterion = nn.CrossEntropyLoss(label_smoothing=CONFIG["label_smoothing"])
 
 def run_epoch(model, loader, optimizer=None, scheduler=None, freeze_backbone_bn=False):
     train = optimizer is not None
@@ -153,34 +188,50 @@ def run_epoch(model, loader, optimizer=None, scheduler=None, freeze_backbone_bn=
 run_epoch.scaler = torch.amp.GradScaler(enabled=USE_AMP)
 
 history = []
+writer = SummaryWriter(RUN_DIR)
+best = {"val_top1": -1.0, "epoch": 0, "path": f"{RUN_DIR}/best.pth"}
+
 def fit(epochs, optimizer, scheduler=None, phase="", freeze_backbone_bn=False):
     for ep in range(epochs):
         t0 = time.perf_counter()
         tr = run_epoch(model, train_dl, optimizer, scheduler, freeze_backbone_bn)
         va = run_epoch(model, val_dl)
         history.append({"phase": phase, "train_loss": tr["loss"], "train_top1": tr["top1"], "val_loss": va["loss"], "val_top1": va["top1"]})
+        step = len(history)
+        writer.add_scalars("loss", {"treino": tr["loss"], "validacao": va["loss"]}, step)
+        writer.add_scalars("acuracia_top1", {"treino": tr["top1"], "validacao": va["top1"]}, step)
+        for i, g in enumerate(optimizer.param_groups):
+            writer.add_scalar(f"lr/grupo_{i}", g["lr"], step)
+        if va["top1"] > best["val_top1"]:  # guarda o melhor modelo na validação, em qualquer fase
+            best.update(val_top1=va["top1"], epoch=step)
+            torch.save(model.state_dict(), best["path"])
         print(f"[{phase}] época {ep + 1}/{epochs} | treino loss {tr['loss']:.3f} acc {tr['top1']:.3f} | "
               f"val loss {va['loss']:.3f} acc {va['top1']:.3f} | {time.perf_counter() - t0:.0f}s")
 """),
 ("code", """
-EPOCHS_HEAD = 1 if SMOKE else 3
-EPOCHS_FT = 1 if SMOKE else 8
+EPOCHS_HEAD, EPOCHS_FT = CONFIG["epochs_head"], CONFIG["epochs_finetune"]
+t_train = time.perf_counter()
 
 # Fase 1: só o classificador
 for p in model.features.parameters():
     p.requires_grad = False
-opt = torch.optim.AdamW(model.classifier.parameters(), lr=1e-3, weight_decay=1e-4)
+opt = torch.optim.AdamW(model.classifier.parameters(), lr=CONFIG["lr_head"], weight_decay=CONFIG["weight_decay"])
 fit(EPOCHS_HEAD, opt, phase="cabeça", freeze_backbone_bn=True)
 
 # Fase 2: modelo inteiro, com LR diferente por grupo
 for p in model.parameters():
     p.requires_grad = True
+lrs = [CONFIG["lr_backbone_ft"], CONFIG["lr_classifier_ft"]]
 opt = torch.optim.AdamW([
-    {"params": model.features.parameters(), "lr": 1e-4},
-    {"params": model.classifier.parameters(), "lr": 1e-3},
-], weight_decay=1e-4)
-sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[1e-4, 1e-3], epochs=EPOCHS_FT, steps_per_epoch=len(train_dl), pct_start=0.15)
+    {"params": model.features.parameters(), "lr": lrs[0]},
+    {"params": model.classifier.parameters(), "lr": lrs[1]},
+], weight_decay=CONFIG["weight_decay"])
+sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lrs, epochs=EPOCHS_FT, steps_per_epoch=len(train_dl), pct_start=0.15)
 fit(EPOCHS_FT, opt, sched, phase="fine-tuning")
+
+train_time_s = time.perf_counter() - t_train
+model.load_state_dict(torch.load(best["path"], map_location=device))
+print(f"melhor validação: {best['val_top1']:.4f} na época {best['epoch']} (modelo carregado) | treino total {train_time_s:.0f}s")
 """),
 ("code", """
 ep = range(1, len(history) + 1)
@@ -274,12 +325,34 @@ ckpt = {
     "test_top1": te["top1"],
     "test_top5": te["top5"],
     "smoke": SMOKE,
+    "config": CONFIG,
+    "run_dir": RUN_DIR,
 }
-path = f"{ARTIFACTS}/mobilenetv3_pets.pth"
+path = f"{ARTIFACTS}/mobilenetv3_pets.pth"  # caminho fixo, usado pelo notebook 04
 torch.save(ckpt, path)
-with open(f"{ARTIFACTS}/train_history.json", "w") as f:
+
+metrics = {"best_val_top1": best["val_top1"], "best_epoch": best["epoch"], "test_top1": te["top1"],
+           "test_top5": te["top5"], "train_time_s": train_time_s}
+writer.add_hparams(CONFIG, {f"hparam/{k}": v for k, v in metrics.items()}, run_name="hparams")
+writer.close()
+with open(f"{RUN_DIR}/metrics.json", "w") as f:
+    json.dump(metrics, f, indent=1)
+with open(f"{RUN_DIR}/history.json", "w") as f:
     json.dump(history, f, indent=1)
 print(f"checkpoint salvo em {path} ({os.path.getsize(path) / 1e6:.1f} MB)")
+print(json.dumps(metrics, indent=1))
+"""),
+("md", """
+### Acompanhando no TensorBoard
+
+As curvas de loss, acurácia e LR de cada grupo de parâmetros ficam registradas por execução. A aba **HPARAMS** compara configurações diferentes, por exemplo `rrc_scale_min` 0.6 vs. 0.3 ou mais épocas de fine-tuning.
+"""),
+("code", """
+if IN_COLAB:
+    get_ipython().run_line_magic("load_ext", "tensorboard")
+    get_ipython().run_line_magic("tensorboard", f"--logdir '{ARTIFACTS}/runs'")
+else:
+    print(f"Para abrir localmente: tensorboard --logdir {ARTIFACTS}/runs")
 """),
 ("md", """
 ## Conclusões
